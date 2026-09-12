@@ -1,0 +1,25 @@
+name: Debug Outputs
+
+on:
+  push:
+    paths:
+      - ".github/workflows/debug.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - id: check
+        run: |
+          should_release=true
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+
+  debug:
+    needs: check
+    runs-on: ubuntu-latest
+    if: needs.check.outputs.should_release == 'true'
+    steps:
+      - run: echo "release condition is true"
+      - run: echo 'outputs=${{ toJSON(needs.check.outputs) }}'
