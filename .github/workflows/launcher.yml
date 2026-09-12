@@ -1,0 +1,166 @@
+name: Build Launcher Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 强制重新构建并覆盖发布
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: launcher-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Eltirosto/Degrees-of-Lewdity-Chinese-Localization
+
+jobs:
+  sync-upstream:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream main
+          git merge --no-edit upstream/main
+          git push origin main
+
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      name: ${{ steps.check.outputs.name }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" -o release.json
+          tag=$(jq -r '.tag_name' release.json)
+          name=$(jq -r '.name' release.json)
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "无法获取上游最新 release"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: [sync-upstream, check-upstream]
+    if: always() && needs.check-upstream.result == 'success'
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Prepare container
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v6
+      - name: Install build dependencies
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl jq unzip zip \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev
+      - name: Download upstream release assets
+        env:
+          TAG: ${{ needs.check-upstream.outputs.tag }}
+        run: |
+          curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/releases/tags/${TAG}" -o release.json
+          mkdir -p upstream
+          game_url=$(jq -r '.assets[] | select(.name | test("^DoL-ModLoader-.*\\.zip$")) | select(.name | contains("polyfill") | not) | .browser_download_url' release.json | head -n1)
+          i18n_url=$(jq -r '.assets[] | select(.name | test("^ModI18N-.*\\.mod\\.zip$")) | .browser_download_url' release.json | head -n1)
+          pack_url=$(jq -r '.assets[] | select(.name | test("^GameOriginalImagePack-.*\\.mod\\.zip$")) | .browser_download_url' release.json | head -n1)
+          if [ -z "$game_url" ] || [ -z "$i18n_url" ] || [ -z "$pack_url" ]; then
+            echo "上游资产匹配失败"
+            exit 1
+          fi
+          curl -fsSL "$game_url" -o upstream/game.zip
+          curl -fsSL "$i18n_url" -o upstream/i18n.mod.zip
+          curl -fsSL "$pack_url" -o upstream/imagepack.mod.zip
+      - name: Assemble package
+        env:
+          TAG: ${{ needs.check-upstream.outputs.tag }}
+        run: |
+          mkdir -p pkg/mods
+          unzip -q upstream/game.zip -d pkg
+          cp upstream/i18n.mod.zip pkg/mods/ModI18N.mod.zip
+          cp upstream/imagepack.mod.zip pkg/mods/GameOriginalImagePack.mod.zip
+          launcher/build-launcher.sh --build-only --out pkg
+          cp launcher/dol.sh launcher/dol-icon.png launcher/build-launcher.sh launcher/launcher.c pkg/
+          ver=${TAG#v}
+          (cd pkg && zip -qr "../DoL-Chinese-Launcher-${ver}-linux-x86_64.zip" .)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: launcher-package
+          path: DoL-Chinese-Launcher-*-linux-x86_64.zip
+
+  release:
+    needs: [check-upstream, build]
+    if: needs.check-upstream.outputs.should_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: launcher-package
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.check-upstream.outputs.tag }}
+          NAME: ${{ needs.check-upstream.outputs.name }}
+        run: |
+          asset=$(ls DoL-Chinese-Launcher-*-linux-x86_64.zip | head -n1)
+          cat > notes.md <<EOF
+          ## Degrees of Lewdity 中文版 Linux 启动器包
+
+          对应上游版本: [${NAME}](https://github.com/${UPSTREAM_REPO}/releases/tag/${TAG})
+
+          ### 包内容
+          - 游戏本体 HTML（非 polyfill）
+          - \`mods/ModI18N.mod.zip\` 汉化包
+          - \`mods/GameOriginalImagePack.mod.zip\` 图片包
+          - \`dol-launcher\` WebKitGTK 启动器（预编译 x86_64）
+          - \`dol.sh\` 启动脚本、\`build-launcher.sh\` 自主构建脚本、\`launcher.c\` 源码、\`dol-icon.png\` 图标
+
+          ### 使用
+          1. 解压到任意目录
+          2. 运行 \`./dol.sh\`（或先执行 \`./build-launcher.sh\` 安装桌面菜单项）
+          3. 首次进入游戏后按 Alt+M 打开 Mod 管理器，依次添加 \`mods/\` 下的两个 zip，之后会持久保存
+
+          ### 依赖
+          - Linux x86_64，需已安装 webkit2gtk-4.1、gtk3、libsoup3 运行库
+          - 其他发行版或架构请在解压目录运行 \`./build-launcher.sh\` 自行构建
+
+          ### 说明
+          - 存档与 Mod 数据保存在游戏目录 \`.dol-data/\`
+          - 无 AVX 指令集的旧 CPU 由启动脚本自动规避 WebKitGTK 崩溃
+          EOF
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --title "Linux 启动器包 ${TAG}" --notes-file notes.md
+          fi
