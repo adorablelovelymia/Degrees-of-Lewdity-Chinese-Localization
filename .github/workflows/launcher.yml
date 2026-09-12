@@ -74,8 +74,8 @@ jobs:
           echo "tag=$tag name=$name should_release=$should_release"
 
   build:
-    needs: [sync-upstream, check-upstream]
-    if: always() && needs.check-upstream.result == 'success'
+    needs: check-upstream
+    if: needs.check-upstream.result == 'success'
     runs-on: ubuntu-latest
     container: ubuntu:22.04
     steps:
@@ -169,10 +169,3 @@ jobs:
             gh release create "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --title "Linux 启动器包 ${TAG}" --notes-file notes.md
           fi
 
-  debug-outputs:
-    needs: check-upstream
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo 'outputs=${{ toJSON(needs.check-upstream.outputs) }}'
-      - run: echo "cond=${{ needs.check-upstream.outputs.should_release == 'true' }}"
