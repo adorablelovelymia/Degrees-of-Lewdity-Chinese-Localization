@@ -168,3 +168,11 @@ jobs:
           else
             gh release create "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --title "Linux 启动器包 ${TAG}" --notes-file notes.md
           fi
+
+  debug-outputs:
+    needs: check-upstream
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'outputs=${{ toJSON(needs.check-upstream.outputs) }}'
+      - run: echo "cond=${{ needs.check-upstream.outputs.should_release == 'true' }}"
