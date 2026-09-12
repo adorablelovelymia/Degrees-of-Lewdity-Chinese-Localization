@@ -63,11 +63,15 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          should_release=true
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            should_release=false
           fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_release }}" = "true" ]; then
+            should_release=true
+          fi
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag name=$name should_release=$should_release"
 
   build:
     needs: [sync-upstream, check-upstream]
@@ -121,7 +125,7 @@ jobs:
 
   release:
     needs: [check-upstream, build]
-    if: needs.check-upstream.outputs.should_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_release)
+    if: needs.check-upstream.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v6
